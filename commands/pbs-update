@@ -1,0 +1,158 @@
+#!/bin/bash
+
+log()      { echo -e "\033[1;34m[INFO]\033[0m $*"; }
+fail()     { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
+complete() { echo -e "\033[1;32m[COMPLETE]\033[0m $*"; }
+warn()     { echo -e "\033[1;33m[WARNING]\033[0m $*"; }
+
+JOB="pbs-update"
+DIR1="/opt/ubuntu-autoconfig"
+CMD_DEST="/usr/local/bin"
+LIB_DEST="/usr/local/lib/ubuntu-base"
+DEBUG=0
+
+# Elevate once (one sudo for everything)
+if [ "$EUID" -ne 0 ]; then
+  exec sudo -E bash "$0" "$@"
+fi
+
+set -euo pipefail
+trap 'fail "Script failed at line $LINENO (exit $?)"' ERR
+
+for arg in "$@"; do
+  case "$arg" in
+    --debug) DEBUG=1; set -x; log "Debug mode enabled." ;;
+  esac
+done
+
+log "Starting '$JOB'"
+
+# Change to repo directory
+cd "$DIR1" || fail "Failed to change directory to $DIR1"
+
+# Mark $DIR1 as a safe Git directory for sudo usage
+if sudo -E git config --global --get-all safe.directory 2>/dev/null | grep -qx "$DIR1"; then
+    log "$DIR1 is already a safe Git directory."
+else
+    log "Marking $DIR1 as a safe Git directory..."
+    sudo -E git config --global --add safe.directory "$DIR1"
+fi
+
+# Detect current branch and pull latest
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if ! [[ "$BRANCH" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+    fail "Invalid branch name detected: $BRANCH"
+fi
+log "Branch: '$BRANCH'"
+
+log "Pulling latest changes..."
+sudo HOME=/home/commsadmin -E git pull origin "$BRANCH" || fail "Git pull failed for $DIR1"
+
+# Deploy shared libraries (all .sh files from lib/)
+log "Deploying shared libraries to $LIB_DEST..."
+sudo mkdir -p "$LIB_DEST"
+for lib in "$DIR1"/lib/*.sh; do
+  [ -f "$lib" ] || continue
+  lib_name=$(basename "$lib")
+  sudo cp "$lib" "$LIB_DEST/$lib_name"
+  sudo chmod 644 "$LIB_DEST/$lib_name"
+done
+log "Shared libraries deployed."
+
+# Deploy PBS commands
+PBS_COMMANDS=(pbs-backup pbs-restore pbs-update pbs-setup)
+for script in "${PBS_COMMANDS[@]}"; do
+    SRC="$DIR1/commands/$script"
+    DST="$CMD_DEST/$script"
+
+    if [ ! -f "$SRC" ]; then
+        warn "Source script $SRC not found; skipping."
+        continue
+    fi
+
+    if [ -f "$DST" ]; then
+        sudo cp "$DST" "$DST.bak.$(date +%Y%m%d%H%M%S)"
+        # Keep only the most recent .bak file
+        bak_files=($(ls -1t "$DST.bak."* 2>/dev/null))
+        if (( ${#bak_files[@]} > 1 )); then
+            for old_bak in "${bak_files[@]:1}"; do
+                sudo rm -f "$old_bak"
+            done
+        fi
+        log "Backed up existing $script"
+    fi
+
+    sudo cp "$SRC" "$DST"
+    sudo chmod +x "$DST"
+    log "$script installed."
+done
+
+# Encrypt and deploy env file
+if [ -f "$DIR1/configs/pbs-backup.env" ]; then
+    log "Deploying /etc/pbs-backup.env (encrypted)..."
+    # Use a temp file so we don't clobber the deployed copy mid-write
+    TMPENV="$(mktemp)"
+    cp "$DIR1/configs/pbs-backup.env" "$TMPENV"
+
+    # If the deployed copy has real credentials (not placeholders), preserve them
+    if [ -f /etc/pbs-backup.env ]; then
+        # Source the deployed copy to get current values (may be encrypted)
+        if [ -f "$LIB_DEST/pbs-crypt.sh" ]; then
+            # shellcheck source=/dev/null
+            source "$LIB_DEST/pbs-crypt.sh"
+            pbs_source_env /etc/pbs-backup.env
+        else
+            # shellcheck source=/dev/null
+            source /etc/pbs-backup.env
+        fi
+
+        # Carry forward non-placeholder values into the new template
+        for var in PBS_REPOSITORY PBS_PASSWORD PBS_FINGERPRINT PBS_BACKUP_TARGETS PBS_KEYFILE PBS_ENCRYPTION_PASSWORD; do
+            local_val="${!var:-}"
+            [ -z "$local_val" ] && continue
+            # Skip placeholders
+            [[ "$local_val" == "YOUR-API-TOKEN-SECRET-HERE" ]] && continue
+            [[ "$local_val" == "CHANGE-ME-to-a-strong-passphrase" ]] && continue
+            # Update the temp file with the real value
+            if grep -q "^${var}=" "$TMPENV"; then
+                sed -i "s|^${var}=.*|${var}=\"${local_val}\"|" "$TMPENV"
+            fi
+        done
+    fi
+
+    # Encrypt sensitive values
+    if [ -f "$LIB_DEST/pbs-crypt.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$LIB_DEST/pbs-crypt.sh"
+        pbs_encrypt_env_file "$TMPENV" "$TMPENV"
+        log "Encrypted PBS credentials."
+    fi
+
+    sudo cp "$TMPENV" /etc/pbs-backup.env
+    sudo chmod 600 /etc/pbs-backup.env
+    sudo chown root:root /etc/pbs-backup.env
+    rm -f "$TMPENV"
+    log "Deployed /etc/pbs-backup.env."
+else
+    warn "configs/pbs-backup.env not found in repo; skipping env deployment."
+fi
+
+# Deploy cron job
+log "Deploying cron job..."
+sudo tee /etc/cron.d/pbs-backup >/dev/null <<'EOF_CRON'
+# Proxmox Backup Server - nightly backup
+0 2 * * * root /usr/local/bin/pbs-backup >> /var/log/pbs-backup.log 2>&1
+EOF_CRON
+sudo chmod 644 /etc/cron.d/pbs-backup
+
+# Deploy logrotate config
+if [ -f "$DIR1/configs/pbs-backup-logrotate" ]; then
+    sudo cp "$DIR1/configs/pbs-backup-logrotate" /etc/logrotate.d/pbs-backup
+    sudo chmod 644 /etc/logrotate.d/pbs-backup
+    log "Deployed logrotate config."
+fi
+
+# Never touch /etc/pbs/encryption-key.json
+log "Encryption key untouched (manage separately)."
+
+complete "$JOB"

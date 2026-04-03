@@ -1,0 +1,49 @@
+#!/bin/bash
+
+log()      { echo -e "\033[1;34m[INFO]\033[0m $*"; }
+fail()     { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
+complete() { echo -e "\033[1;32m[COMPLETE]\033[0m $*"; }
+warn()     { echo -e "\033[1;33m[WARNING]\033[0m $*" >&2; }
+
+JOB="system-update-no-reboot"
+
+# Elevate once (one sudo for everything)
+if [ "$EUID" -ne 0 ]; then
+  exec sudo -E bash "$0" "$@"
+fi
+
+set -euo pipefail
+trap 'fail "Script failed at line $LINENO (exit $?)"' ERR
+
+# Non-interactive + auto-restart services during upgrade
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
+log "Starting '$JOB'"
+
+log "Refreshing package lists..."
+apt-get update -y
+
+log "Upgrading packages (keeping existing configs when modified)..."
+apt-get -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold" \
+        dist-upgrade -y
+
+log "Fixing any partially configured packages (if any)..."
+dpkg --configure -a || true
+apt-get -f install -y || true
+
+log "Removing inactive packages (autoremove --purge)..."
+apt-get autoremove --purge -y
+
+log "Cleaning package cache..."
+apt-get autoclean -y
+
+# Optional: daemon reload after upgrades
+systemctl daemon-reload || true
+
+if [ -f /var/run/reboot-required ]; then
+  warn "A reboot is recommended (file /var/run/reboot-required exists), but this script will not reboot."
+fi
+
+complete "Updates complete. No reboot performed."

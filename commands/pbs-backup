@@ -1,0 +1,90 @@
+#!/bin/bash
+
+log()      { echo -e "\033[1;34m[INFO]\033[0m $*"; }
+fail()     { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
+complete() { echo -e "\033[1;32m[COMPLETE]\033[0m $*"; }
+warn()     { echo -e "\033[1;33m[WARNING]\033[0m $*"; }
+
+JOB="pbs-backup"
+DEBUG=0
+
+# Elevate once (one sudo for everything)
+if [ "$EUID" -ne 0 ]; then
+  exec sudo -E bash "$0" "$@"
+fi
+
+set -euo pipefail
+trap 'fail "Script failed at line $LINENO (exit $?)"' ERR
+
+for arg in "$@"; do
+  case "$arg" in
+    --debug) DEBUG=1; set -x; log "Debug mode enabled." ;;
+  esac
+done
+
+PBS_ENV_FILE="/etc/pbs-backup.env"
+
+if [ ! -f "$PBS_ENV_FILE" ]; then
+  fail "PBS config not found at $PBS_ENV_FILE. Run init.sh --with-pbs to deploy it."
+fi
+
+# Source env file with decryption support
+if [ -f /usr/local/lib/ubuntu-base/pbs-crypt.sh ]; then
+  # shellcheck source=/dev/null
+  source /usr/local/lib/ubuntu-base/pbs-crypt.sh
+  pbs_source_env "$PBS_ENV_FILE"
+else
+  # shellcheck source=/dev/null
+  source "$PBS_ENV_FILE"
+fi
+
+# Validate required variables
+if [ -z "${PBS_REPOSITORY:-}" ]; then
+  fail "PBS_REPOSITORY is not set in $PBS_ENV_FILE"
+fi
+if [ -z "${PBS_PASSWORD:-}" ] || [ "$PBS_PASSWORD" = "YOUR-API-TOKEN-SECRET-HERE" ]; then
+  fail "PBS_PASSWORD is not configured in $PBS_ENV_FILE"
+fi
+
+# Export for proxmox-backup-client
+export PBS_REPOSITORY
+export PBS_PASSWORD
+if [ -n "${PBS_FINGERPRINT:-}" ]; then
+  export PBS_FINGERPRINT
+fi
+
+# Encryption key support
+KEYFILE_ARGS=()
+if [ -n "${PBS_KEYFILE:-}" ] && [ -f "$PBS_KEYFILE" ]; then
+  log "Encryption enabled (keyfile: $PBS_KEYFILE)"
+  KEYFILE_ARGS=(--keyfile "$PBS_KEYFILE")
+  if [ -n "${PBS_ENCRYPTION_PASSWORD:-}" ] && [ "$PBS_ENCRYPTION_PASSWORD" != "CHANGE-ME-to-a-strong-passphrase" ]; then
+    export PBS_ENCRYPTION_PASSWORD
+  fi
+elif [ -n "${PBS_KEYFILE:-}" ] && [ ! -f "$PBS_KEYFILE" ]; then
+  warn "PBS_KEYFILE set to $PBS_KEYFILE but file does not exist. Running WITHOUT encryption."
+fi
+
+log "Starting '$JOB'"
+log "PBS server: $PBS_REPOSITORY"
+
+# Build target list, skipping paths that don't exist
+TARGETS=()
+for entry in $PBS_BACKUP_TARGETS; do
+  label="${entry%%:*}"
+  path="${entry#*:}"
+  if [ -d "$path" ]; then
+    TARGETS+=("$label:$path")
+  else
+    warn "Skipping $label -- path $path does not exist"
+  fi
+done
+
+if [ ${#TARGETS[@]} -eq 0 ]; then
+  fail "No valid backup targets found. Check PBS_BACKUP_TARGETS in $PBS_ENV_FILE"
+fi
+
+log "Backing up ${#TARGETS[@]} target(s): ${TARGETS[*]}"
+proxmox-backup-client backup "${TARGETS[@]}" "${KEYFILE_ARGS[@]}"
+
+complete "$JOB"

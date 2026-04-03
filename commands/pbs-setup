@@ -1,0 +1,118 @@
+#!/bin/bash
+
+log()      { echo -e "\033[1;34m[INFO]\033[0m $*"; }
+fail()     { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
+complete() { echo -e "\033[1;32m[COMPLETE]\033[0m $*"; }
+warn()     { echo -e "\033[1;33m[WARNING]\033[0m $*"; }
+
+JOB="pbs-setup"
+REPO_ROOT="/opt/ubuntu-autoconfig"
+LIB_DEST="/usr/local/lib/ubuntu-base"
+DEBUG=0
+
+# Elevate once (one sudo for everything)
+if [ "$EUID" -ne 0 ]; then
+  exec sudo -E bash "$0" "$@"
+fi
+
+set -euo pipefail
+trap 'fail "Script failed at line $LINENO (exit $?)"' ERR
+
+for arg in "$@"; do
+  case "$arg" in
+    --debug) DEBUG=1; set -x; log "Debug mode enabled." ;;
+  esac
+done
+
+log "Starting '$JOB'"
+
+# --- 1. Download Proxmox GPG key ---
+log "Downloading Proxmox GPG key."
+curl -fsSL http://download.proxmox.com/debian/proxmox-release-bookworm.gpg \
+  | tee /usr/share/keyrings/proxmox-archive-keyring.gpg >/dev/null
+
+# --- 2. Add APT repo ---
+if [ -f /etc/apt/sources.list.d/pbs-client.list ]; then
+  log "PBS client repo already configured; skipping."
+else
+  log "Adding PBS client APT repo."
+  echo "deb [signed-by=/usr/share/keyrings/proxmox-archive-keyring.gpg] http://download.proxmox.com/debian/pbs-client bookworm main" \
+    | tee /etc/apt/sources.list.d/pbs-client.list >/dev/null
+fi
+
+# --- 3. Install proxmox-backup-client ---
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+apt-get update -y
+apt-get install -y proxmox-backup-client
+
+# --- 4. Deploy env file (encrypted) ---
+if [ -f "$REPO_ROOT/configs/pbs-backup.env" ]; then
+  cp "$REPO_ROOT/configs/pbs-backup.env" /etc/pbs-backup.env
+  chmod 600 /etc/pbs-backup.env
+  chown root:root /etc/pbs-backup.env
+  # Encrypt sensitive values in deployed env file
+  if [ -f "$LIB_DEST/pbs-crypt.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$LIB_DEST/pbs-crypt.sh"
+    pbs_encrypt_env_file /etc/pbs-backup.env /etc/pbs-backup.env
+    log "Encrypted PBS credentials in /etc/pbs-backup.env."
+  elif [ -f "$REPO_ROOT/lib/pbs-crypt.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/lib/pbs-crypt.sh"
+    pbs_encrypt_env_file /etc/pbs-backup.env /etc/pbs-backup.env
+    log "Encrypted PBS credentials in /etc/pbs-backup.env."
+  fi
+  log "Deployed /etc/pbs-backup.env (edit with real PBS server details before use)."
+else
+  warn "configs/pbs-backup.env not found; skipping config deployment."
+fi
+
+# --- 5. Generate encryption key (never overwrite) ---
+# Source deployed env to get PBS_KEYFILE and PBS_ENCRYPTION_PASSWORD
+if [ -f "$LIB_DEST/pbs-crypt.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$LIB_DEST/pbs-crypt.sh"
+  pbs_source_env /etc/pbs-backup.env
+elif [ -f /etc/pbs-backup.env ]; then
+  # shellcheck source=/dev/null
+  source /etc/pbs-backup.env
+fi
+
+keyfile="${PBS_KEYFILE:-/etc/pbs/encryption-key.json}"
+if [ -f "$keyfile" ]; then
+  log "PBS encryption key already exists at $keyfile; skipping generation."
+else
+  keydir="$(dirname "$keyfile")"
+  mkdir -p "$keydir"
+  if [ -n "${PBS_ENCRYPTION_PASSWORD:-}" ] && [ "$PBS_ENCRYPTION_PASSWORD" != "CHANGE-ME-to-a-strong-passphrase" ]; then
+    log "Generating PBS encryption key at $keyfile (password-protected, scrypt KDF)."
+    PBS_ENCRYPTION_PASSWORD="$PBS_ENCRYPTION_PASSWORD" \
+      proxmox-backup-client key create "$keyfile" --kdf scrypt
+  else
+    warn "PBS_ENCRYPTION_PASSWORD not configured — generating key WITHOUT password (kdf=none)."
+    warn "Data is still encrypted at rest (AES-256-GCM). To add key password, regenerate later."
+    proxmox-backup-client key create "$keyfile" --kdf none
+  fi
+  chmod 600 "$keyfile"
+  chown root:root "$keyfile"
+  log "PBS encryption key created at $keyfile."
+  warn "CRITICAL: Back up this key file separately. Without it, encrypted backups cannot be restored."
+fi
+
+# --- 6. Deploy cron job ---
+log "Installing PBS backup cron job (nightly at 2 AM)."
+tee /etc/cron.d/pbs-backup >/dev/null <<'EOF_CRON'
+# Proxmox Backup Server - nightly backup
+0 2 * * * root /usr/local/bin/pbs-backup >> /var/log/pbs-backup.log 2>&1
+EOF_CRON
+chmod 644 /etc/cron.d/pbs-backup
+
+# --- 7. Deploy logrotate ---
+if [ -f "$REPO_ROOT/configs/pbs-backup-logrotate" ]; then
+  cp "$REPO_ROOT/configs/pbs-backup-logrotate" /etc/logrotate.d/pbs-backup
+  chmod 644 /etc/logrotate.d/pbs-backup
+  log "Deployed logrotate config for pbs-backup."
+fi
+
+complete "$JOB — PBS client installed and configured."

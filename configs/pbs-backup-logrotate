@@ -1,0 +1,8 @@
+/var/log/pbs-backup.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+}

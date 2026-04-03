@@ -1,0 +1,3 @@
+#!/bin/bash
+# Wrapper for autoconfig-only hosts. Repo-specific update-commands overwrites this.
+exec update-commands-base "$@"
