@@ -46,7 +46,7 @@ fi
 log "Branch: '$BRANCH'"
 
 log "Pulling latest changes..."
-sudo HOME=/home/commsadmin -E git pull origin "$BRANCH" || fail "Git pull failed for $DIR1"
+sudo HOME=/home/kynetra -E git pull origin "$BRANCH" || fail "Git pull failed for $DIR1"
 
 # Deploy shared libraries (all .sh files from lib/)
 log "Deploying shared libraries to $LIB_DEST..."

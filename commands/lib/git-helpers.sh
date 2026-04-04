@@ -48,7 +48,7 @@ update_git_repo_pull() {
     log "Detected current Git branch: '$BRANCH'"
 
     log "Pulling latest changes from Git..."
-    sudo HOME=/home/commsadmin -E git pull origin "$BRANCH" || fail "Git pull failed for $dir"
+    sudo HOME=/home/kynetra -E git pull origin "$BRANCH" || fail "Git pull failed for $dir"
 
     log "Making all .sh files executable..."
     find "$dir" -path "$dir/lost+found" -prune -o -type f -name "*.sh" -exec sudo chmod +x {} +

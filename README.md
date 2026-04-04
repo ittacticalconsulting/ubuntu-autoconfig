@@ -1,10 +1,9 @@
 # Ubuntu Autoconfig
 
-AWS-first automation to bootstrap Ubuntu hosts (with Proxmox/other hypervisors as secondary). Creates `commsadmin`, applies sshd/sudoers/authorized_keys, configures proxies, installs baseline tooling, Docker, qemu-guest-agent (non-AWS), optional PBS backup client, and base maintenance commands. A removal script cleans up proxies/commands and optionally the user.
+Automation to bootstrap personal Ubuntu servers (Proxmox VMs or bare metal). Creates `kynetra`, applies sshd/sudoers/authorized_keys, installs baseline tooling, Docker, qemu-guest-agent, optional PBS backup client, and base maintenance commands. A removal script cleans up commands and optionally the user.
 
 ## Contents
 
-- [AWS vs Non-AWS Behavior](#aws-vs-non-aws-behavior)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start-remote-host)
 - [Init Flags](#init-flags)
@@ -21,63 +20,20 @@ AWS-first automation to bootstrap Ubuntu hosts (with Proxmox/other hypervisors a
   - [Rebuilding a Machine from Backup](#rebuilding-a-machine-from-backup)
 - [Notes](#notes)
 
-## AWS vs Non-AWS Behavior
-
-Init detects the environment via **IMDSv2** (AWS Instance Metadata Service v2). Behavior differs based on detection:
-
-| Feature | AWS EC2 | Non-AWS (Proxmox, bare metal) |
-|---------|---------|-------------------------------|
-| User creation | Always creates `commsadmin` | Always creates `commsadmin` |
-| QEMU guest agent | Skipped | Installed and enabled |
-| PBS backup client | Available (`--with-pbs`) | Available (`--with-pbs`) |
-
-Detection is automatic -- if the IMDSv2 token endpoint (`http://169.254.169.254`) responds, the host is treated as AWS. There are currently no environment variable overrides to force or skip AWS detection.
-
-### Athena integration (FTP/NTP stack on non-AWS)
-
-The companion [athena](https://nsggroup.visualstudio.com/Network-Ops/_git/athena) repo (`init-athena.sh`) uses the same IMDSv2 check. On AWS, the FTP/TFTP/HTTP/NTP stack installs automatically. On non-AWS hosts that need those services, set `FTP=Yes` before running athena init:
-
-```bash
-export FTP=Yes
-sudo -E ./init-athena.sh
-```
-
-The `FTP` variable can also be persisted to `/etc/environment` using athena's `set-ftp-yes.sh` script so it survives reboots and is picked up by `update-athena`.
-
-Key athena environment variables that can be pre-configured on the host:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `FTP` | _(empty)_ | Set to `Yes` on non-AWS to enable FTP/NTP stack |
-| `AUTO_REGION_NTP` | `true` | Auto-select NTP pools based on AWS region |
-| `NTP_UPSTREAM_SERVERS` | North America + Europe pools | Space-separated NTP server FQDNs |
-| `NTP_ALLOW_SUBNETS` | `10.0.0.0/8 138.84.0.0/16` | Networks allowed to query NTP |
-| `NTP_BIND` | `0.0.0.0` | NTP server bind address |
-| `NTP_OPEN_UFW` | `true` | Open UFW firewall for UDP/123 |
-| `DEVICE` | _(auto-detect)_ | Block device for FTP storage volume |
-| `MOUNT_POINT` | `/mnt/ftp` | FTP storage mount path |
-| `OWNER` | `1000:1000` | UID:GID ownership of FTP directory |
-| `ATHENA_CRED_HOME` | `/home/commsadmin` | Path to home dir containing `.netrc` for git |
-
 ## Prerequisites
 - Ubuntu host with sudo access.
-- Proxy credentials reachable to Ubuntu mirrors (hardcoded in script per manual guide).
-- PAT in `~/.netrc` for cloning/pulling from Azure DevOps.
 
 ## Quick Start (remote host)
 ```bash
-nano ~/.netrc
-# ensure your Azure DevOps Git PAT is present
-
 sudo -E mkdir -p /opt/ubuntu-autoconfig && cd /opt/ubuntu-autoconfig
 sudo -E git init
-sudo -E git remote add origin https://nsggroup.visualstudio.com/Network-Ops/_git/ubuntu-autoconfig
+sudo -E git remote add origin https://github.com/ittacticalconsulting/ubuntu-autoconfig.git
 sudo -E git config --global --add safe.directory /opt/ubuntu-autoconfig
 sudo -E git checkout -b main
 sudo -E git reset --hard HEAD
 sudo -E git pull origin main --allow-unrelated-histories
 
-# run bootstrap (prompts for commsadmin password; will reboot at end)
+# run bootstrap (prompts for kynetra password; will reboot at end)
 sudo -E chmod +x scripts/init.sh
 sudo -E ./scripts/init.sh --debug --hostname myserver01   # drop --debug for quieter; --hostname to skip prompt
 ```
@@ -95,7 +51,7 @@ Without `--with-pbs` or `--no-pbs`, init will prompt interactively. Without `--h
 
 ## Removal
 ```bash
-sudo -E ./scripts/remove.sh                                          # remove proxies/commands
+sudo -E ./scripts/remove.sh                                          # remove commands
 sudo -E ./scripts/remove.sh --purge-user --remove-qemu               # remove user/home and qemu-guest-agent
 sudo -E ./scripts/remove.sh --remove-pbs                             # remove PBS client and config
 sudo -E ./scripts/remove.sh --purge-user --remove-qemu --remove-pbs  # full removal
@@ -103,15 +59,14 @@ sudo -E ./scripts/remove.sh --purge-user --remove-qemu --remove-pbs  # full remo
 
 ## What Init Does
 1) Set hostname (interactive prompt or `--hostname` flag); skip if user presses Enter.
-2) Ensure `commsadmin` exists; prompt for password if newly created; copy `.netrc` from invoking user.
+2) Ensure `kynetra` exists; prompt for password if newly created; copy `.netrc` from invoking user.
 3) Apply `configs/sudoers`, `configs/sshd_config`, `configs/authorized_keys`.
-4) Configure proxies for apt, shell (`.bashrc`), and Docker override.
-5) Install baseline packages: curl, iperf3 (preseeded), traceroute, tree, dos2unix, glances, speedtest-cli, systemd.
-6) Install Docker CE/Compose from Docker repo; add `commsadmin` to docker group.
-7) Install qemu-guest-agent on non-AWS.
-8) Optionally install Proxmox Backup Server client (see below).
-9) Install base commands (`commands/*`) to `/usr/local/bin` and libs to `/usr/local/lib/ubuntu-base`. Includes `update-commands-base` (pulls autoconfig repo and deploys base commands) and a thin `update-commands` wrapper (overwritten by repo-specific versions on hosts with athena/hyperion/etc).
-10) Run `system-update-with-reboot` (will reboot).
+4) Install baseline packages: curl, iperf3 (preseeded), traceroute, tree, dos2unix, glances, speedtest-cli, systemd.
+5) Install Docker CE/Compose from Docker repo; add `kynetra` to docker group.
+6) Install qemu-guest-agent.
+7) Optionally install Proxmox Backup Server client (see below).
+8) Install base commands (`commands/*`) to `/usr/local/bin` and libs to `/usr/local/lib/ubuntu-base`. Includes `update-commands-base` (pulls autoconfig repo and deploys base commands) and a thin `update-commands` wrapper.
+9) Run `system-update-with-reboot` (will reboot).
 
 ## Proxmox Backup Server (PBS) Client
 
@@ -124,6 +79,7 @@ Optional PBS client installation for backing up and restoring hosts to/from a Pr
 - `/usr/local/bin/pbs-backup` — backup command (cron'd nightly at 2 AM)
 - `/usr/local/bin/pbs-restore` — restore command
 - `/usr/local/bin/pbs-update` — pull latest code and re-deploy PBS artifacts
+- `/usr/local/bin/pbs-setup` — standalone PBS client installation
 - `/usr/local/lib/ubuntu-base/pbs-crypt.sh` — credential encryption/decryption helper
 - `/etc/cron.d/pbs-backup` — nightly cron job
 - `/etc/logrotate.d/pbs-backup` — weekly log rotation (4 copies, compressed)
@@ -187,7 +143,7 @@ What happens: validates config, decrypts credentials from `/etc/pbs-backup.env`,
 
 | Label | Path | Rationale |
 |-------|------|-----------|
-| `home.pxar` | `/home/commsadmin` | User data and configs |
+| `home.pxar` | `/home/kynetra` | User data and configs |
 | `mnt.pxar` | `/mnt` | Mounted data volumes |
 | `docker-volumes.pxar` | `/var/lib/docker/volumes` | Docker named volume storage |
 
@@ -205,8 +161,6 @@ Configure prune jobs in the PBS web UI: **Datastore > Prune & GC > Prune Jobs**.
 | Weekly | 4 |
 | Monthly | 3 |
 
-> **Note**: The backup token only needs the **DatastoreBackup** role (not DatastorePowerUser). See [PBS token permissions](#pbs-token-permissions).
-
 ### Updating PBS artifacts
 
 Use `pbs-update` to pull the latest code and re-deploy all PBS-related files without running the full `init.sh`:
@@ -217,7 +171,7 @@ sudo pbs-update --debug   # same, with shell tracing
 ```
 
 What it deploys:
-- PBS commands (`pbs-backup`, `pbs-restore`, `pbs-update`) to `/usr/local/bin`
+- PBS commands (`pbs-backup`, `pbs-restore`, `pbs-update`, `pbs-setup`) to `/usr/local/bin`
 - Shared libraries (`lib/*.sh`) to `/usr/local/lib/ubuntu-base/`
 - `/etc/pbs-backup.env` — merges repo template with existing credentials, encrypts sensitive values
 - Cron job at `/etc/cron.d/pbs-backup`
@@ -261,7 +215,7 @@ sudo pbs-restore --help
 
 ### PBS token permissions
 
-The current token `AWSbackup@pbs!AWSClients` needs:
+The PBS backup token needs:
 - **DatastoreBackup** — create backups and restore own backups
 
 For restore of other hosts' snapshots, the token also needs:
@@ -269,7 +223,7 @@ For restore of other hosts' snapshots, the token also needs:
 
 Pruning is handled server-side; the client token does **not** need prune permissions. This limits the blast radius if a host is compromised — an attacker cannot delete backup history.
 
-Configure in the PBS web UI: **Configuration > Access Control > Permissions**. Add a new ACL entry for the token with path `/datastore/BCK01_scsi1` and the appropriate role.
+Configure in the PBS web UI: **Configuration > Access Control > Permissions**. Add a new ACL entry for the token with the appropriate datastore path and role.
 
 **PBS datastore roles reference:**
 
@@ -301,7 +255,5 @@ sudo pbs-restore --snapshot host/oldhost/2024-01-15T02:00:00Z  # use old hostnam
 ```
 
 ## Notes
-- Hardcoded proxy per manual deploy: `http://iris:BEDSIDE-martine-paying@proxy.network.pilkington.net:3128`; `no_proxy` includes internal ranges.
-- AWS detection via IMDSv2; QEMU GA only on non-AWS.
 - Debug: `--debug` enables tracing and extra logging.
 - Config files live in `configs/`; update them as needed before running.

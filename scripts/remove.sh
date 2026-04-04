@@ -7,13 +7,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MANAGED_USER="commsadmin"
-PROXY_URL="http://iris:BEDSIDE-martine-paying@proxy.network.pilkington.net:3128"
-NO_PROXY_LIST=".pilkington.net,localhost,127.0.0.1,::1,138.84.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-APT_PROXY_FILE="/etc/apt/apt.conf.d/90curtin-aptproxy"
-PROFILE_PROXY_FILE="/etc/profile.d/proxy.sh"
-DOCKER_PROXY_DIR="/etc/systemd/system/docker.service.d"
-DOCKER_PROXY_FILE="$DOCKER_PROXY_DIR/http-proxy.conf"
+MANAGED_USER="kynetra"
 LIB_DEST="/usr/local/lib/ubuntu-base"
 CMD_DEST="/usr/local/bin"
 REMOVE_USER=false
@@ -44,21 +38,10 @@ warn()     { echo -e "[WARN] $*"; }
 fail()     { echo -e "[ERROR] $*" >&2; exit 1; }
 complete() { echo -e "[COMPLETE] $*"; }
 
-log "Starting removal." 
-
-remove_proxy() {
-  rm -f "$APT_PROXY_FILE" || true
-  rm -f "$PROFILE_PROXY_FILE" || true
-  rm -f "$DOCKER_PROXY_FILE" || true
-  systemctl daemon-reload || true
-  if systemctl is-active --quiet docker; then
-    systemctl restart docker || warn "Docker restart failed after proxy removal."
-  fi
-  log "Removed proxy configurations."
-}
+log "Starting removal."
 
 remove_base_commands() {
-  for cmd in system-update-with-reboot system-update-no-reboot update-commands update-commands-base pbs-backup pbs-restore pbs-update; do
+  for cmd in system-update-with-reboot system-update-no-reboot update-commands update-commands-base pbs-backup pbs-restore pbs-update pbs-setup; do
     if [ -f "$CMD_DEST/$cmd" ]; then
       rm -f "$CMD_DEST/$cmd"
       log "Removed $CMD_DEST/$cmd"
@@ -108,7 +91,6 @@ purge_user() {
 }
 
 main() {
-  remove_proxy
   remove_base_commands
   remove_qemu_ga
   remove_pbs_client

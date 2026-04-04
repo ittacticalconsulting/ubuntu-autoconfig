@@ -56,7 +56,7 @@ git_pull_current_branch() {
     echo "[INFO] Detected current Git branch: '$branch'"
     echo "[INFO] Pulling latest changes from branch '$branch'..."
     
-    if ! sudo HOME=/home/commsadmin -E git pull origin "$branch"; then
+    if ! sudo HOME=/home/kynetra -E git pull origin "$branch"; then
         echo "[ERROR] Git pull failed for branch '$branch'" >&2
         return 1
     fi

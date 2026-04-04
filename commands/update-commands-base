@@ -58,7 +58,7 @@ log "Detected current Git branch: '$BRANCH'"
 
 # Pull latest changes from the detected branch
 log "Pulling latest changes from Git..."
-sudo HOME=/home/commsadmin -E git pull origin "$BRANCH" || fail "Git pull failed for $DIR1"
+sudo HOME=/home/kynetra -E git pull origin "$BRANCH" || fail "Git pull failed for $DIR1"
 
 log "Making all .sh files executable..."
 find "$DIR1" -path "$DIR1/lost+found" -prune -o -type f -name "*.sh" -exec sudo chmod +x {} +
