@@ -14,8 +14,32 @@ REMOVE_USER=false
 REMOVE_QEMU=false
 REMOVE_PBS=false
 
+usage() {
+  cat <<EOF
+Usage: remove.sh [OPTIONS]
+
+Remove autoconfig applied by init.sh. By default removes base commands.
+
+Options:
+  --purge-user   Remove the $MANAGED_USER user and home directory
+  --remove-qemu  Uninstall QEMU guest agent
+  --remove-pbs   Uninstall PBS client and remove its configs/cron/keys
+  -h, --help     Show this help message
+
+Examples:
+  sudo -E ./scripts/remove.sh
+  sudo -E ./scripts/remove.sh --purge-user --remove-qemu
+  sudo -E ./scripts/remove.sh --remove-pbs
+  sudo -E ./scripts/remove.sh --purge-user --remove-qemu --remove-pbs
+EOF
+  exit 0
+}
+
 while [[ ${1:-} ]]; do
   case "$1" in
+    -h|--help)
+      usage
+      ;;
     --purge-user)
       REMOVE_USER=true
       ;;
@@ -26,7 +50,7 @@ while [[ ${1:-} ]]; do
       REMOVE_PBS=true
       ;;
     *)
-      echo "Unknown option: $1" >&2
+      echo "Unknown option: $1. Use --help for usage." >&2
       exit 1
       ;;
   esac
@@ -41,7 +65,7 @@ complete() { echo -e "[COMPLETE] $*"; }
 log "Starting removal."
 
 remove_base_commands() {
-  for cmd in system-update-with-reboot system-update-no-reboot update-commands update-commands-base pbs-backup pbs-restore pbs-update pbs-setup; do
+  for cmd in system-update-with-reboot system-update-no-reboot update-commands update-commands-base init-autoconfig-update pbs-backup pbs-restore pbs-update pbs-setup; do
     if [ -f "$CMD_DEST/$cmd" ]; then
       rm -f "$CMD_DEST/$cmd"
       log "Removed $CMD_DEST/$cmd"

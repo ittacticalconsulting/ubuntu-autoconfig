@@ -13,6 +13,9 @@ ORIG_USER="${SUDO_USER:-ubuntu}"
 ORIG_HOME="/home/$ORIG_USER"
 INSTALL_PBS="${INSTALL_PBS:-}"   # empty=ask interactively, "yes"=install, "no"=skip
 NEW_HOSTNAME="${NEW_HOSTNAME:-}"  # empty=ask interactively, set=apply directly
+UNATTENDED="${UNATTENDED:-0}"     # 1=skip all interactive prompts, use defaults
+NO_REBOOT="${NO_REBOOT:-0}"       # 1=use system-update-no-reboot instead of with-reboot
+TIMEZONE="${TIMEZONE:-America/Detroit}"
 
 # Logging helpers
 if [ -f "$REPO_ROOT/lib/logging.sh" ]; then
@@ -25,13 +28,42 @@ else
   complete() { echo -e "[COMPLETE] $*"; }
 fi
 
+usage() {
+  cat <<EOF
+Usage: init.sh [OPTIONS]
+
+Bootstrap an Ubuntu host with baseline configs, Docker, and base commands.
+Must be run as root (or via sudo -E).
+
+Options:
+  --hostname <name>  Set hostname (skip interactive prompt); validated against RFC 1123
+  --timezone <tz>    Set timezone (default: America/Detroit)
+  --unattended       Skip all interactive prompts and use safe defaults
+  --with-pbs         Install Proxmox Backup Server client
+  --no-pbs           Skip PBS client installation
+  --no-reboot        Use system-update-no-reboot instead of system-update-with-reboot
+  --debug            Enable bash debug tracing (set -x)
+  -h, --help         Show this help message
+
+Examples:
+  sudo -E ./scripts/init.sh --debug --hostname myserver01
+  sudo -E ./scripts/init.sh --unattended --hostname myserver01 --with-pbs
+  sudo -E ./scripts/init.sh --no-reboot --timezone America/New_York
+EOF
+  exit 0
+}
+
 while [[ ${1:-} ]]; do
   case "$1" in
-    --debug)    DEBUG_FLAG=1 ;;
-    --with-pbs)  INSTALL_PBS="yes" ;;
-    --no-pbs)    INSTALL_PBS="no" ;;
-    --hostname)  shift; NEW_HOSTNAME="${1:-}"; [ -z "$NEW_HOSTNAME" ] && fail "--hostname requires a value" ;;
-    *)           fail "Unknown option: $1" ;;
+    -h|--help)    usage ;;
+    --debug)      DEBUG_FLAG=1 ;;
+    --with-pbs)   INSTALL_PBS="yes" ;;
+    --no-pbs)     INSTALL_PBS="no" ;;
+    --hostname)   shift; NEW_HOSTNAME="${1:-}"; [ -z "$NEW_HOSTNAME" ] && fail "--hostname requires a value" ;;
+    --timezone)   shift; TIMEZONE="${1:-}"; [ -z "$TIMEZONE" ] && fail "--timezone requires a value" ;;
+    --unattended) UNATTENDED=1 ;;
+    --no-reboot)  NO_REBOOT=1 ;;
+    *)            fail "Unknown option: $1. Use --help for usage." ;;
   esac
   shift
 done
@@ -58,6 +90,10 @@ log "Running as user: $(whoami) (EUID=$EUID)${RUN_AS_MANAGED:+; RUN_AS_MANAGED s
 
 set_hostname() {
   if [ -z "$NEW_HOSTNAME" ]; then
+    if [ "$UNATTENDED" = "1" ]; then
+      log "Unattended mode; keeping current hostname ($(hostname))."
+      return
+    fi
     local current
     current="$(hostname)"
     read -rp "Enter hostname for this server [keep current: $current]: " NEW_HOSTNAME
@@ -81,6 +117,24 @@ set_hostname() {
   fi
 
   log "Hostname set to $NEW_HOSTNAME (hostnamectl + /etc/hosts updated)."
+}
+
+set_timezone() {
+  local current_tz
+  current_tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo "")"
+
+  if [ "$current_tz" = "$TIMEZONE" ]; then
+    log "Timezone already set to $TIMEZONE; skipping."
+    return
+  fi
+
+  if [ ! -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+    fail "Invalid timezone '$TIMEZONE'. Check /usr/share/zoneinfo for valid values."
+  fi
+
+  log "Setting timezone to $TIMEZONE."
+  as_root timedatectl set-timezone "$TIMEZONE"
+  log "Timezone set to $TIMEZONE."
 }
 
 ensure_user() {
@@ -122,6 +176,10 @@ switch_to_managed_home() {
 
 set_user_password_if_new() {
   if ! $USER_CREATED; then
+    return
+  fi
+  if [ "$UNATTENDED" = "1" ]; then
+    warn "Unattended mode; skipping password prompt for $MANAGED_USER. Set password manually later."
     return
   fi
   local pw1 pw2
@@ -171,6 +229,26 @@ apply_configs() {
   fi
 }
 
+configure_dhcp_identifier() {
+  local netplan_dir="/etc/netplan"
+  local netplan_file
+  netplan_file="$(find "$netplan_dir" -maxdepth 1 -name '*.yaml' -print -quit 2>/dev/null || true)"
+
+  if [ -z "$netplan_file" ]; then
+    warn "No netplan config found in $netplan_dir; skipping DHCP identifier override."
+    return
+  fi
+
+  if grep -q 'dhcp-identifier:' "$netplan_file" 2>/dev/null; then
+    log "DHCP identifier already configured in $netplan_file; skipping."
+    return
+  fi
+
+  log "Setting DHCP identifier to MAC address in $netplan_file (clone-safe)."
+  as_root sed -i '/dhcp4:\s*true/a\      dhcp-identifier: mac' "$netplan_file"
+  log "DHCP identifier set to MAC — will take effect on reboot."
+}
+
 install_baseline_packages() {
   log "Refreshing package lists."
   echo "iperf3 iperf3/server boolean false" | as_root debconf-set-selections
@@ -204,12 +282,17 @@ install_qemu_ga() {
 
 install_pbs_client() {
   if [ -z "$INSTALL_PBS" ]; then
-    local answer
-    read -rp "Install Proxmox Backup Server client? [y/N]: " answer
-    case "${answer,,}" in
-      y|yes) INSTALL_PBS="yes" ;;
-      *)     INSTALL_PBS="no" ;;
-    esac
+    if [ "$UNATTENDED" = "1" ]; then
+      log "Unattended mode; skipping PBS client installation."
+      INSTALL_PBS="no"
+    else
+      local answer
+      read -rp "Install Proxmox Backup Server client? [y/N]: " answer
+      case "${answer,,}" in
+        y|yes) INSTALL_PBS="yes" ;;
+        *)     INSTALL_PBS="no" ;;
+      esac
+    fi
   fi
 
   if [ "$INSTALL_PBS" != "yes" ]; then
@@ -313,24 +396,32 @@ install_base_commands() {
   log "Installed base commands to $CMD_DEST and libs to $LIB_DEST."
 }
 
-run_system_update_with_reboot() {
-  local updater
-  if [ -x "$REPO_ROOT/commands/system-update-with-reboot" ]; then
-    updater="$REPO_ROOT/commands/system-update-with-reboot"
+run_system_update() {
+  local cmd_name
+  if [ "$NO_REBOOT" = "1" ]; then
+    cmd_name="system-update-no-reboot"
   else
-    updater="$CMD_DEST/system-update-with-reboot"
+    cmd_name="system-update-with-reboot"
+  fi
+
+  local updater
+  if [ -x "$REPO_ROOT/commands/$cmd_name" ]; then
+    updater="$REPO_ROOT/commands/$cmd_name"
+  else
+    updater="$CMD_DEST/$cmd_name"
   fi
   if [ -x "$updater" ]; then
-    log "Running system update with reboot (final step) via $updater."
+    log "Running $cmd_name (final step) via $updater."
     as_root bash "$updater"
   else
-    warn "system-update-with-reboot not found or not executable; skipping."
+    warn "$cmd_name not found or not executable; skipping."
   fi
 }
 
 main() {
   if [ -z "${RUN_AS_MANAGED:-}" ] && [ "$EUID" -eq 0 ]; then
     set_hostname
+    set_timezone
     ensure_user
     set_user_password_if_new
     copy_netrc_if_present
@@ -347,6 +438,9 @@ main() {
       DEBUG_FLAG="$DEBUG_FLAG" \
       INSTALL_PBS="$INSTALL_PBS" \
       NEW_HOSTNAME="$NEW_HOSTNAME" \
+      UNATTENDED="$UNATTENDED" \
+      NO_REBOOT="$NO_REBOOT" \
+      TIMEZONE="$TIMEZONE" \
       HOME="/home/$MANAGED_USER" \
       bash "$REPO_ROOT/scripts/init.sh" "$@"
   fi
@@ -354,12 +448,13 @@ main() {
   switch_to_managed_home
   ensure_user
   apply_configs
+  configure_dhcp_identifier
   install_baseline_packages
   install_docker
   install_qemu_ga
   install_pbs_client
   install_base_commands
-  run_system_update_with_reboot
+  run_system_update
   complete "Baseline configuration applied."
 }
 
