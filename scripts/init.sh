@@ -211,6 +211,11 @@ apply_configs() {
 
   if [ -f "$REPO_ROOT/configs/sshd_config" ]; then
     as_root cp "$REPO_ROOT/configs/sshd_config" /etc/ssh/sshd_config
+    # Remove cloud-init sshd override that conflicts with our PasswordAuthentication setting
+    if [ -f /etc/ssh/sshd_config.d/50-cloud-init.conf ]; then
+      as_root rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf
+      log "Removed conflicting cloud-init sshd override."
+    fi
     as_root systemctl reload ssh || as_root systemctl reload sshd || true
     log "Applied sshd_config."
   else
